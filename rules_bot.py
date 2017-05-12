@@ -222,9 +222,12 @@ def other_plaintext(bot, update):
     if chat_username == "pythontelegrambotgroup":
         if any(ot in update.message.text.lower() for ot in ('off-topic', 'off topic', 'offtopic')):
             if update.message.reply_to_message and update.message.reply_to_message.text:
+                issued_reply = _get_reply_id(update)
+
                 update.message.reply_text("I moved this discussion to the "
                                           "[off-topic Group](https://telegram.me/pythontelegrambottalk).",
-                                          disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN)
+                                          disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN,
+                                          reply_to_message_id=issued_reply)
 
                 if update.message.reply_to_message.from_user.username:
                     name = '@' + update.message.reply_to_message.from_user.username
