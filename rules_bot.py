@@ -1,9 +1,9 @@
 import configparser
 import logging
 import os
+import re
 import urllib.parse
 from collections import namedtuple
-from pprint import pprint
 from uuid import uuid4
 
 from bs4 import BeautifulSoup
@@ -16,6 +16,7 @@ from telegram.ext import InlineQueryHandler
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 import util
+from custemoji import Emoji
 
 if os.environ.get('ROOLSBOT_DEBUG'):
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,6 +33,7 @@ config.read('bot.ini')
 updater = Updater(token=config['KEYS']['bot_api'])
 dispatcher = updater.dispatcher
 
+ENCLOSING_REPLACEMENT_CHARACTER = '$'
 OFFTOPIC_CHAT_ID = '@pythontelegrambottalk'
 
 ONTOPIC_RULES = """This group is for questions, answers and discussions around the <a href="https://python-telegram-bot.org/">python-telegram-bot library</a> and, to some extent, Telegram bots in general.
@@ -80,10 +82,27 @@ for li in wiki_soup.select("ul.wiki-pages > li"):
         wiki_pages[li.strong.a.string] = "https://github.com" + li.strong.a['href']
 
 
-def start(bot, update):
-    if update.message.chat.username not in ("pythontelegrambotgroup", "pythontelegrambottalk"):
+def start(bot, update, args=None):
+    if args:
+        if args[0] == 'inline-help':
+            inlinequery_help(bot, update)
+    elif update.message.chat.username not in ("pythontelegrambotgroup", "pythontelegrambottalk"):
         update.message.reply_text("Hi. I'm a bot that will anounce the rules of the "
                                   "python-telegram-bot groups when you type /rules.")
+
+
+def inlinequery_help(bot, update):
+    chat_id = update.message.chat_id
+    text = "Use the `{char}`-character in your inline queries and I will replace them with a link to the corresponding " \
+           "article from the documentation or wiki.\n\n" \
+           "*Example:*\n" \
+           "@roolsbot I 💙 {char}InlineQueries{char}, but you need an {char}InlineQueryHandler{char} for it." \
+           "\n\n*becomes:*\n" \
+           "I 💙 [InlineQueries](https://python-telegram-bot.readthedocs.io/en/latest/telegram.html#telegram" \
+           ".InlineQuery), but you need an [InlineQueryHandler](https://python-telegram-bot.readthedocs.io/en" \
+           "/latest/telegram.ext.html#telegram.ext.InlineQueryHandler) for it.".format(
+        char=ENCLOSING_REPLACEMENT_CHARACTER)
+    bot.sendMessage(chat_id, text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
 def rules(bot, update):
@@ -101,6 +120,7 @@ def rules(bot, update):
 def get_docs(search, threshold=80):
     search = list(reversed(search.split('.')))
     best = (0, None)
+
     for typ, items in docs_inv.items():
         if typ not in ['py:staticmethod', 'py:exception', 'py:method', 'py:module', 'py:class', 'py:attribute',
                        'py:data', 'py:function']:
@@ -257,14 +277,75 @@ def other_plaintext(bot, update):
             update.message.reply_text("What? Make it yourself.", quote=True)
 
 
+def fuzzy_replacements_markdown(query, threshold=95):
+    enclosed_regex = r'\{char}([a-zA-Z_.0-9]*)\{char}'.format(
+        char=ENCLOSING_REPLACEMENT_CHARACTER)  # match names enclosed in {char}...{char}
+    symbols = re.findall(enclosed_regex, query)
+
+    if not symbols:
+        return None, None
+
+    replacements = list()
+    for s in symbols:
+        doc = get_docs(s, threshold=threshold)
+
+        if doc:
+            # replace only once in the query
+            if doc.short_name in replacements:
+                continue
+
+            text = "[{}]({})"
+            text = text.format(s, doc.url)
+
+            replacements.append((True, doc.short_name, s, text))
+            continue
+
+        wiki = search_wiki(s)
+        if wiki and wiki[0] > threshold:
+            text = "[{}]({})".format(s, wiki[1][1])
+            replacements.append((True, wiki[1][0], s, text))
+            continue
+
+        # not found
+        replacements.append((False, '{}{}'.format(Emoji.BLACK_QUESTION_MARK_ORNAMENT, s), s, s))
+
+    result = query
+    for found, name, symbol, text in replacements:
+        result = result.replace('{char}{symbol}{char}'.format(
+            symbol=symbol,
+            char=ENCLOSING_REPLACEMENT_CHARACTER
+        ), text)
+
+    result_changed = [x[1] for x in replacements]
+
+    # # TODO sort the list by errors first
+    # pprint(list(enumerate([x[1] for x in replacements])))
+    # result_changed = sorted(enumerate([x[1] for x in replacements]), key=lambda k: k[1][0])
+
+    return result_changed, result
+
+
 def inlinequery(bot, update, threshold=60):
     query = update.inline_query.query
     results_list = list()
 
-    wiki = search_wiki(query)
-    doc = get_docs(query)
+    modified, replaced = fuzzy_replacements_markdown(query, threshold=threshold)
 
     if len(query) > 0:
+
+        if modified:
+            results_list.append(InlineQueryResultArticle(
+                id=uuid4(),
+                title="Replace Links",
+                description=', '.join(modified),
+                input_message_content=InputTextMessageContent(
+                    message_text=replaced,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True)
+            ))
+
+        wiki = search_wiki(query)
+        doc = get_docs(query)
 
         # add the doc if found
         if doc:
@@ -285,8 +366,6 @@ def inlinequery(bot, update, threshold=60):
 
         # add the best wiki page if weight is over threshold
         if wiki and wiki[0] > threshold:
-            print('abc')
-            print(util.escape_markdown(wiki[1][0]))
             results_list.append(InlineQueryResultArticle(
                 id=uuid4(),
                 title="{w[0]}".format(w=wiki[1]),
@@ -325,7 +404,8 @@ def inlinequery(bot, update, threshold=60):
                     disable_web_page_preview=True,
                 )))
 
-    bot.answerInlineQuery(update.inline_query.id, results=results_list)
+    bot.answerInlineQuery(update.inline_query.id, results=results_list, switch_pm_text='Help',
+                          switch_pm_parameter='inline-help')
 
 
 def error(bot, update, error):
@@ -333,7 +413,7 @@ def error(bot, update, error):
     logger.warn('Update "%s" caused error "%s"' % (update, error))
 
 
-start_handler = CommandHandler('start', start)
+start_handler = CommandHandler('start', start, pass_args=True)
 rules_handler = CommandHandler('rules', rules)
 docs_handler = CommandHandler('docs', docs, pass_args=True, allow_edited=True, pass_chat_data=True)
 wiki_handler = CommandHandler('wiki', wiki, pass_args=True, allow_edited=True, pass_chat_data=True)
